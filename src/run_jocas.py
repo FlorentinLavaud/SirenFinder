@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+import os 
 
 import duckdb
 import pandas as pd
@@ -70,6 +71,28 @@ def parse_args() -> argparse.Namespace:
     )
     return parser.parse_args()
 
+def get_s3_duckdb_connection():
+    # Création d'une connexion DuckDB en mémoire
+    con = duckdb.connect(database=':memory:')
+    
+    # Chargement des extensions nécessaires pour S3
+    con.execute("INSTALL httpfs;")
+    con.execute("LOAD httpfs;")
+    
+    # Configuration des accès S3 via les variables d'environnement Onyxia
+    con.execute(f"SET s3_access_key_id='{os.environ.get('AWS_ACCESS_KEY_ID')}';")
+    con.execute(f"SET s3_secret_access_key='{os.environ.get('AWS_SECRET_ACCESS_KEY')}';")
+    
+    # Très important sur Onyxia : l'endpoint MinIO et le token de session
+    if os.environ.get('AWS_SESSION_TOKEN'):
+        con.execute(f"SET s3_session_token='{os.environ.get('AWS_SESSION_TOKEN')}';")
+        
+    # Endpoint MinIO du SSP Cloud (ex: minio.lab.sspcloud.fr)
+    s3_endpoint = os.environ.get('AWS_S3_ENDPOINT', 'minio.lab.sspcloud.fr')
+    con.execute(f"SET s3_endpoint='{s3_endpoint}';")
+    con.execute("SET s3_url_style='path';")
+    
+    return con
 
 def extract_missing_entities(
     conn: duckdb.DuckDBPyConnection, min_offers: int = 1, limit: int | None = None

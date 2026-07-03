@@ -241,12 +241,28 @@ def main() -> None:
     resolved_df = run_resolution(missing_df)
     join_back(conn, resolved_df)
 
-    # Exemple d'export -- à adapter (parquet local, réécriture S3, etc.)
-    conn.sql("SELECT * FROM jocas_enriched").write_parquet(str(DATA_DIR / "jocas_enriched.parquet"))
-    logger.info(
-        "Terminé en %.1fs. Résultat : %s", time.time() - start_time, DATA_DIR / "jocas_enriched.parquet"
-    )
-
+    # --- CONFIGURATION S3 POUR DUCKDB ---
+    print("Configuration de la connexion S3...")
+    conn.execute("LOAD httpfs;")
+    
+    # Récupération automatique des variables d'environnement Onyxia
+    conn.execute(f"SET s3_access_key_id='{os.environ.get('AWS_ACCESS_KEY_ID')}';")
+    conn.execute(f"SET s3_secret_access_key='{os.environ.get('AWS_SECRET_ACCESS_KEY')}';")
+    
+    if os.environ.get('AWS_SESSION_TOKEN'):
+        conn.execute(f"SET s3_session_token='{os.environ.get('AWS_SESSION_TOKEN')}';")
+        
+    s3_endpoint = os.environ.get('AWS_S3_ENDPOINT', 'minio.lab.sspcloud.fr')
+    conn.execute(f"SET s3_endpoint='{s3_endpoint}';")
+    conn.execute("SET s3_url_style='path';")
+    
+    # --- EXPORTATION DIRECTE VERS MINIO ---
+    bucket_name = "flavaud"  # <--- METS LE NOM DE TON BUCKET ICI
+    s3_destination = f"s3://{bucket_name}/SirenFinder/jocas_enriched.parquet"
+    
+    print(f"Écriture du fichier enrichi directement sur S3: {s3_destination}")
+    conn.execute(f"COPY jocas_enriched TO '{s3_destination}' (FORMAT PARQUET);")
+    print("Export S3 terminé avec succès !")
 
 if __name__ == "__main__":
     main()

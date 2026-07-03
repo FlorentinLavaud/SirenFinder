@@ -3,3 +3,5 @@ numpy>=1.24
 pyarrow>=14.0
 requests>=2.31
 google-api-python-client>=2.100  # uniquement nécessaire si le fallback Google CSE est activé
+duckdb>=0.10  # requis par run_jocas.py / diagnostics.py (lecture S3 + strip_accents)
+s3fs>=2024.2  # requis par run_jocas.py / diagnostics.py (endpoint SSP Cloud/OVH)

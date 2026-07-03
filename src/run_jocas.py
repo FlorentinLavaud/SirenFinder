@@ -1,0 +1,229 @@
+"""Adaptateur JOCAS pour siren_resolver.
+
+JOCAS expose directement les colonnes entreprise_nom / entreprise_siren
+(déjà partiellement rempli) et une localisation en colonnes séparées
+(location_label / location_zipcode / location_departement), sans le
+format JSON du script d'origine ni la distinction contracting/awarded.
+
+Ce script :
+  1. interroge la vue DuckDB `jocas` pour extraire les couples
+     (entreprise_nom, localisation) DISTINCTS dont le SIREN est manquant,
+     en excluant les placeholders connus (cf `jocas_common.NAME_BLACKLIST`) ;
+  2. les priorise par fréquence d'apparition (une entité récurrente coûte
+     le même appel API qu'une entité vue une seule fois, mais rapporte
+     bien plus une fois résolue) et applique un seuil optionnel `--min-offers` ;
+  3. les résout via le pipeline (cache -> API officielle -> Google CSE) ;
+  4. réintègre le SIREN résolu dans une vue jointe, prête à réexporter.
+
+Usage :
+    python run_jocas.py                       # run complet
+    python run_jocas.py --dry-run             # affiche juste le volume à traiter
+    python run_jocas.py --min-offers 3        # ne traite que les entités >= 3 offres
+    python run_jocas.py --limit 500 --dry-run # test rapide sur un sous-ensemble
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import time
+
+import duckdb
+import pandas as pd
+
+from jocas_common import (
+    DASK_ARTIFACT_COLUMNS,
+    DATA_DIR,
+    ENTREPRISE_COLUMNS,
+    connect_jocas,
+    sql_clean_numeric,
+    sql_is_blacklisted_name,
+    sql_siren_norm,
+)
+from siren_resolver import (
+    GoogleCSEProvider,
+    ParquetSirenCache,
+    RechercheEntreprisesProvider,
+    ResolverConfig,
+    SirenResolutionPipeline,
+    SirenResolver,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--min-offers", type=int, default=1,
+        help="Ne traiter que les entités apparaissant au moins N fois dans les offres sans SIREN "
+             "(priorisation ROI : une entité récurrente coûte le même appel API qu'une entité "
+             "unique mais rapporte bien plus une fois résolue). Défaut : 1 (aucun filtre).",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="Limite le nombre d'entités traitées (utile pour un test rapide).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="N'appelle aucune API et n'écrit aucun fichier : affiche seulement le volume "
+             "qui serait traité avec ces paramètres.",
+    )
+    return parser.parse_args()
+
+
+def extract_missing_entities(
+    conn: duckdb.DuckDBPyConnection, min_offers: int = 1, limit: int | None = None
+) -> pd.DataFrame:
+    """Extrait les entités distinctes (nom + localisation) sans SIREN,
+    hors placeholders connus, triées par fréquence décroissante.
+
+    DISTINCT ici est essentiel : sans lui on repasserait potentiellement
+    des millions de lignes de marchés dans le pipeline, alors qu'il n'y a
+    probablement que quelques dizaines de milliers d'entreprises uniques.
+
+    Le tri par n_offres DESC + le seuil --min-offers permettent de
+    prioriser : sur JOCAS, ~0.4% des entités sans SIREN n'apparaissent
+    qu'une seule fois (ROI marginal), le reste est très récurrent.
+    """
+    # entreprise_siren / location_zipcode / location_departement peuvent être
+    # typées DOUBLE côté parquet (colonnes numériques avec NaN mélangés à des
+    # valeurs), ce qui casse trim() (pas de trim(DOUBLE) en DuckDB) et produit
+    # des suffixes ".0" une fois castées en texte. On repasse systématiquement
+    # par une regexp qui strippe ce suffixe, quel que soit le type d'origine.
+    query = f"""
+        SELECT
+            entreprise_nom,
+            location_label,
+            {sql_clean_numeric('location_zipcode')} AS location_zipcode,
+            {sql_clean_numeric('location_departement')} AS location_departement,
+            count(*) AS n_offres
+        FROM jocas
+        WHERE entreprise_nom IS NOT NULL
+          AND trim(entreprise_nom) != ''
+          AND NOT {sql_is_blacklisted_name('entreprise_nom')}
+        GROUP BY entreprise_nom, location_label, location_zipcode, location_departement
+        -- on n'exclut une entité que si elle a un SIREN connu QUELQUE PART
+        -- dans la table, pas seulement sur la ligne courante : ça évite de
+        -- re-résoudre une entreprise déjà identifiée sur un autre marché.
+        HAVING count(*) FILTER (WHERE {sql_siren_norm('entreprise_siren')} IS NOT NULL) = 0
+           AND count(*) >= {int(min_offers)}
+        ORDER BY n_offres DESC
+    """
+    if limit is not None:
+        query += f"\n        LIMIT {int(limit)}"
+
+    df = conn.sql(query).df()
+    logger.info(
+        "%d entités distinctes à résoudre (min_offers=%d%s), couvrant %d offres.",
+        len(df), min_offers, f", limit={limit}" if limit else "", int(df["n_offres"].sum()) if len(df) else 0,
+    )
+    return df
+
+
+def run_resolution(missing_df: pd.DataFrame) -> pd.DataFrame:
+    missing_path = DATA_DIR / "jocas_missing_siren.parquet"
+    resolved_path = DATA_DIR / "jocas_resolved_siren.parquet"
+    missing_df.to_parquet(missing_path, index=False)
+
+    config = ResolverConfig()
+    cache = ParquetSirenCache(
+        path=DATA_DIR / "stock_entreprise_sirens.parquet",
+        name_col=ENTREPRISE_COLUMNS.name_col,
+        address_col="ENTREPRISE_ADDRESS",  # label interne au cache, indépendant des colonnes source
+        siren_col=ENTREPRISE_COLUMNS.siren_col,
+        prune_probability=config.pipeline.cache_prune_probability,
+        prune_seed=config.pipeline.cache_prune_seed,
+    )
+    providers = [
+        RechercheEntreprisesProvider(config.recherche_entreprises, config.pipeline.min_match_score),
+        GoogleCSEProvider(config.google_cse),
+    ]
+    resolver = SirenResolver(cache=cache, providers=providers)
+    pipeline = SirenResolutionPipeline(config=config, resolver=resolver, cache=cache, columns=ENTREPRISE_COLUMNS)
+
+    return pipeline.run(missing_input_path=missing_path, resolved_output_path=resolved_path)
+
+
+def join_back(conn: duckdb.DuckDBPyConnection, resolved_df: pd.DataFrame) -> None:
+    """Réintègre les SIREN dans la base JOCAS complète (toutes les lignes),
+    en trois niveaux de priorité par ligne :
+      1. le SIREN déjà présent sur la ligne elle-même ;
+      2. un SIREN déjà connu ailleurs pour la même entité (autre marché) ;
+      3. le SIREN nouvellement résolu par le pipeline.
+
+    Les entités blacklistées (cf jocas_common.NAME_BLACKLIST) et celles
+    sous le seuil --min-offers n'apparaissent pas dans `resolved_entities`
+    et restent donc naturellement sans SIREN, sans traitement spécial ici.
+    """
+    conn.register("resolved_entities", resolved_df)
+    conn.sql(f"""
+        CREATE OR REPLACE VIEW jocas_enriched AS
+        WITH entity_known_siren AS (
+            SELECT
+                entreprise_nom,
+                location_label,
+                {sql_clean_numeric('location_zipcode')} AS location_zipcode,
+                {sql_clean_numeric('location_departement')} AS location_departement,
+                max({sql_siren_norm('entreprise_siren')}) AS known_siren
+            FROM jocas
+            GROUP BY entreprise_nom, location_label, location_zipcode, location_departement
+        ),
+        jocas_norm AS (
+            SELECT
+                j.* EXCLUDE (entreprise_siren),
+                {sql_clean_numeric('j.location_zipcode')} AS location_zipcode_norm,
+                {sql_siren_norm('j.entreprise_siren')} AS entreprise_siren_norm
+            FROM jocas j
+        )
+        SELECT
+            j.* EXCLUDE (location_zipcode_norm, entreprise_siren_norm, {", ".join(DASK_ARTIFACT_COLUMNS)}),
+            COALESCE(
+                j.entreprise_siren_norm,
+                k.known_siren,
+                {sql_siren_norm('r.entreprise_siren')}
+            ) AS entreprise_siren
+        FROM jocas_norm j
+        LEFT JOIN entity_known_siren k
+          ON lower(trim(j.entreprise_nom)) = lower(trim(k.entreprise_nom))
+         AND coalesce(j.location_zipcode_norm, '') = coalesce(k.location_zipcode, '')
+         AND coalesce(j.location_label, '') = coalesce(k.location_label, '')
+        LEFT JOIN resolved_entities r
+          ON lower(trim(j.entreprise_nom)) = lower(trim(r.entreprise_nom))
+         AND coalesce(j.location_zipcode_norm, '') = coalesce(r.location_zipcode, '')
+         AND coalesce(j.location_label, '') = coalesce(r.location_label, '')
+    """)
+    logger.info("Vue 'jocas_enriched' créée avec les SIREN résolus.")
+
+
+def main() -> None:
+    logging.basicConfig(level="INFO", format="%(asctime)s [%(levelname)s] %(message)s")
+    args = parse_args()
+
+    start_time = time.time()
+    conn = connect_jocas()
+
+    missing_df = extract_missing_entities(conn, min_offers=args.min_offers, limit=args.limit)
+    if missing_df.empty:
+        logger.info("Rien à résoudre avec ces paramètres.")
+        return
+
+    if args.dry_run:
+        logger.info(
+            "[dry-run] %d entités seraient envoyées au pipeline (%d offres couvertes). "
+            "Aucun appel API, aucun fichier écrit.",
+            len(missing_df), int(missing_df["n_offres"].sum()),
+        )
+        return
+
+    resolved_df = run_resolution(missing_df)
+    join_back(conn, resolved_df)
+
+    # Exemple d'export -- à adapter (parquet local, réécriture S3, etc.)
+    conn.sql("SELECT * FROM jocas_enriched").write_parquet(str(DATA_DIR / "jocas_enriched.parquet"))
+    logger.info(
+        "Terminé en %.1fs. Résultat : %s", time.time() - start_time, DATA_DIR / "jocas_enriched.parquet"
+    )
+
+
+if __name__ == "__main__":
+    main()

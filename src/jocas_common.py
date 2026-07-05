@@ -53,6 +53,8 @@ NAME_BLACKLIST = {
     "--",
     "*",
     ".",
+    "communes",
+    "place-de-l-emploi-public",
 }
 
 

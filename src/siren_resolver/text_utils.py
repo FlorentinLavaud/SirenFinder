@@ -67,9 +67,29 @@ def _safe_parse_dict(raw: str) -> dict:
         return {}
 
 
+def _normalize_address_component(raw) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return None
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text or None
+
+
 def parse_address(raw: str | dict) -> Address:
-    """Construit un Address à partir d'un champ brut (UBL-like dict/JSON)."""
+    """Construit un Address à partir d'un champ brut (UBL-like dict/JSON).
+
+    Si l'adresse fournie est une chaîne non-JSON, on la conserve comme
+    composante brute pour éviter de perdre totalement l'information.
+    """
     d = raw if isinstance(raw, dict) else _safe_parse_dict(raw)
+    if isinstance(raw, str):
+        raw_text = raw.strip()
+        if raw_text and not d:
+            return Address(street=raw_text)
+
     street = d.get("StreetName")
     if isinstance(street, dict):
         street = street.get("#text")

@@ -10,8 +10,8 @@ import pandas as pd
 from .cache import ParquetSirenCache
 from .config import ResolverConfig
 from .models import Address, CompanyQuery
+from .text_utils import parse_address, _normalize_address_component
 from .resolver import SirenResolver
-from .text_utils import parse_address
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,9 @@ class EntityColumns:
     role: str
     address_col: Optional[str] = None
     address_builder: Optional[AddressBuilder] = None
+    zip_code_col: Optional[str] = None
+    city_col: Optional[str] = None
+    department_col: Optional[str] = None
 
     def __post_init__(self):
         if bool(self.address_col) == bool(self.address_builder):
@@ -45,7 +48,43 @@ class EntityColumns:
     def build_address(self, row_dict: dict) -> Address:
         if self.address_builder:
             return self.address_builder(row_dict)
-        return parse_address(row_dict[self.address_col])
+
+        def lookup_component(col_name: Optional[str], *fallbacks: str) -> str | None:
+            if col_name and col_name in row_dict:
+                return row_dict.get(col_name)
+            for fallback in fallbacks:
+                if fallback in row_dict:
+                    return row_dict.get(fallback)
+            return None
+
+        raw_address = row_dict.get(self.address_col)
+        address = parse_address(raw_address)
+
+        zip_code = _normalize_address_component(
+            lookup_component(self.zip_code_col, "location_zipcode", "LOCATION_ZIPCODE")
+        )
+        city = _normalize_address_component(
+            lookup_component(self.city_col, "location_label", "location_city", "LOCATION_LABEL", "LOCATION_CITY")
+        )
+        department_hint = _normalize_address_component(
+            lookup_component(self.department_col, "location_departement", "location_department", "LOCATION_DEPARTEMENT", "LOCATION_DEPARTMENT")
+        )
+
+        street = address.street
+        if street and not address.city and not address.zip_code and (zip_code or city or department_hint):
+            if city is None:
+                city = street
+            street = None
+
+        if zip_code or city or department_hint or address.street or address.city or address.zip_code:
+            return Address(
+                street=street,
+                zip_code=address.zip_code or zip_code,
+                city=address.city or city,
+                department_hint=address.department_hint or department_hint,
+            )
+
+        return address
 
 
 CONTRACTING_COLUMNS = EntityColumns(

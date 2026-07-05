@@ -42,10 +42,10 @@ class RechercheEntreprisesProvider(SirenProvider):
             "q": query.raw_name,
             "per_page": 5,
         }
+        if query.address.zip_code:
+            params["code_postal"] = query.address.zip_code
         if query.address.department:
             params["departement"] = query.address.department
-        elif query.address.zip_code:
-            params["code_postal"] = query.address.zip_code
 
         payload = self._get_with_retry(params)
         best = self._best_match(payload.get("results", []), query)

@@ -22,8 +22,12 @@ class Address:
 
     @property
     def department(self) -> Optional[str]:
-        if self.zip_code and len(self.zip_code) >= 2:
-            return self.zip_code[:2]
+        if self.zip_code:
+            normalized = self.zip_code.strip()
+            if len(normalized) >= 3 and normalized[:2] in {"97", "98"}:
+                return normalized[:3]
+            if len(normalized) >= 2:
+                return normalized[:2]
         return self.department_hint
 
     @property

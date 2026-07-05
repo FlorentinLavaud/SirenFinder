@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
              "unique mais rapporte bien plus une fois résolue). Défaut : 1 (aucun filtre).",
     )
     parser.add_argument(
-        "--limit", type=int, default=None,
+        "--limit", type=int, default=10,
         help="Limite le nombre d'entités traitées (utile pour un test rapide).",
     )
     parser.add_argument(
@@ -99,20 +99,9 @@ def extract_missing_entities(
 ) -> pd.DataFrame:
     """Extrait les entités distinctes (nom + localisation) sans SIREN,
     hors placeholders connus, triées par fréquence décroissante.
-
-    DISTINCT ici est essentiel : sans lui on repasserait potentiellement
-    des millions de lignes de marchés dans le pipeline, alors qu'il n'y a
-    probablement que quelques dizaines de milliers d'entreprises uniques.
-
-    Le tri par n_offres DESC + le seuil --min-offers permettent de
-    prioriser : sur JOCAS, ~0.4% des entités sans SIREN n'apparaissent
-    qu'une seule fois (ROI marginal), le reste est très récurrent.
     """
-    # entreprise_siren / location_zipcode / location_departement peuvent être
-    # typées DOUBLE côté parquet (colonnes numériques avec NaN mélangés à des
-    # valeurs), ce qui casse trim() (pas de trim(DOUBLE) en DuckDB) et produit
-    # des suffixes ".0" une fois castées en texte. On repasse systématiquement
-    # par une regexp qui strippe ce suffixe, quel que soit le type d'origine.
+    # En DuckDB, on peut utiliser directement les numéros de colonnes (1, 2, 3, 4) 
+    # dans le GROUP BY pour s'assurer qu'on regroupe sur le résultat transformé du SELECT.
     query = f"""
         SELECT
             entreprise_nom,
@@ -124,10 +113,7 @@ def extract_missing_entities(
         WHERE entreprise_nom IS NOT NULL
           AND trim(entreprise_nom) != ''
           AND NOT {sql_is_blacklisted_name('entreprise_nom')}
-        GROUP BY entreprise_nom, location_label, location_zipcode, location_departement
-        -- on n'exclut une entité que si elle a un SIREN connu QUELQUE PART
-        -- dans la table, pas seulement sur la ligne courante : ça évite de
-        -- re-résoudre une entreprise déjà identifiée sur un autre marché.
+        GROUP BY 1, 2, 3, 4
         HAVING count(*) FILTER (WHERE {sql_siren_norm('entreprise_siren')} IS NOT NULL) = 0
            AND count(*) >= {int(min_offers)}
         ORDER BY n_offres DESC

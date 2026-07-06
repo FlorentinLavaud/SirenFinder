@@ -168,8 +168,10 @@ class InseeSireneClient:
         self._timeout = timeout_seconds
         self._max_retries = max_retries
 
-    def fetch_page(self, query: str, curseur: str, nombre: int) -> dict[str, Any]:
+    def fetch_page(self, query: str, curseur: str, nombre: int, date: str | None = None) -> dict[str, Any]:
         params = {"q": query, "nombre": nombre, "curseur": curseur}
+        if date:
+            params["date"] = date
         last_error: Exception | None = None
         for attempt in range(self._max_retries):
             self._rate_limiter.acquire()
@@ -195,9 +197,9 @@ class InseeSireneClient:
         raise RuntimeError(f"API Sirene injoignable après {self._max_retries} tentatives : {last_error}")
 
 
-def iter_pages(client: InseeSireneClient, query: str, nombre: int, state: FetchState) -> Iterator[list[dict[str, Any]]]:
+def iter_pages(client: InseeSireneClient, query: str, nombre: int, state: FetchState, date: str | None = None) -> Iterator[list[dict[str, Any]]]:
     while True:
-        payload = client.fetch_page(query, state.curseur, nombre)
+        payload = client.fetch_page(query, state.curseur, nombre, date=date)
         header = payload.get("header", {})
         if state.total_expected is None:
             state.total_expected = header.get("total")
@@ -252,7 +254,23 @@ def flush_batch(conn: duckdb.DuckDBPyConnection, rows: list[dict[str, Any]], out
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Fetch de la base SIRENE complète via l'API INSEE, écriture directe sur MinIO/S3.")
     parser.add_argument("--output", required=True, help="Chemin S3 de sortie (parquet partitionné par code_departement).")
-    parser.add_argument("--query", default="periode(etatAdministratifEtablissement:A)", help="Filtre Sirene (q=...). Par défaut : établissements actifs uniquement.")
+    parser.add_argument(
+        "--query",
+        default="periode(etatAdministratifEtablissement:A)",
+        help="Filtre Sirene (q=...). Par défaut : établissements actifs. À combiner avec --date (voir plus bas) pour ne cibler que la période courante — sans ça, ça matche tout établissement ayant été actif À N'IMPORTE QUEL MOMENT de son historique.",
+    )
+    parser.add_argument(
+        "--date",
+        default=None,
+        help=(
+            "Paramètre 'date' de l'API Sirene (format AAAA-MM-JJ, défaut : aujourd'hui). "
+            "Restreint la recherche à la période EN VIGUEUR à cette date — c'est ce qui "
+            "garantit qu'on cible bien les établissements actifs MAINTENANT, pas "
+            "'actifs un jour dans leur historique'. Cf. doc INSEE : seule la dernière "
+            "période n'a pas de date de fin ; sans ce paramètre, periode(etatAdministratifEtablissement:A) "
+            "matche sur tout l'historique."
+        ),
+    )
     parser.add_argument("--nombre", type=int, default=1000, help="Nombre d'établissements par page (max autorisé par l'API : 1000).")
     parser.add_argument("--requests-per-minute", type=float, default=28.0, help="Cadence d'appel (quota API Sirene plan Public : 30/min).")
     parser.add_argument("--batch-size", type=int, default=50_000, help="Nombre de lignes accumulées avant écriture sur S3.")
@@ -283,6 +301,8 @@ def main() -> None:
         logger.info("Reprise depuis le checkpoint : curseur=%s, déjà récupéré=%d", state.curseur, state.total_fetched)
 
     client = InseeSireneClient(args.insee_api_key, requests_per_minute=args.requests_per_minute)
+    fetch_date = args.date or time.strftime("%Y-%m-%d")
+    logger.info("Filtre : q=%s, date=%s", args.query, fetch_date)
 
     conn = duckdb.connect(database=":memory:")
     configure_s3(conn, args.s3_endpoint, args.s3_access_key_id, args.s3_secret_access_key, args.s3_session_token, args.s3_url_style)
@@ -291,7 +311,7 @@ def main() -> None:
     start_time = time.monotonic()
 
     try:
-        for page in iter_pages(client, args.query, args.nombre, state):
+        for page in iter_pages(client, args.query, args.nombre, state, date=fetch_date):
             for etablissement in page:
                 row = extract_row(etablissement)
                 if row is not None:

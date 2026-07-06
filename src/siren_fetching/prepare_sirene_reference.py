@@ -4,7 +4,6 @@ import argparse
 import logging
 import os
 import time
-from pathlib import Path
 from typing import Iterable
 
 import duckdb

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from .cache import ParquetSirenCache
@@ -31,29 +32,28 @@ class SirenResolver:
         self._providers = providers
 
     def resolve(self, query: CompanyQuery) -> ResolutionResult:
-        cached = self._cache.lookup(query)
-        if cached:
-            return ResolutionResult(query=query, siren=cached, confidence=MatchConfidence.CACHE, match_score=1.0)
+        return asyncio.run(self.resolve_async(query))
 
+    async def resolve_async(self, query: CompanyQuery) -> ResolutionResult:
         if is_groupement(query.raw_name):
-            return self._resolve_composite(query, split_groupement(query.raw_name))
+            return await self._resolve_composite(query, split_groupement(query.raw_name))
         if "/" in query.raw_name and "groupement" not in query.raw_name.lower():
-            return self._resolve_composite(query, split_slash_names(query.raw_name))
+            return await self._resolve_composite(query, split_slash_names(query.raw_name))
 
         if query.address.is_empty:
             logger.debug("Adresse vide pour '%s', résolution impossible.", query.raw_name)
             return ResolutionResult(query=query, siren=None, confidence=MatchConfidence.NONE)
 
-        return self._resolve_single(query)
+        return await self._resolve_single(query)
 
-    def _resolve_composite(self, query: CompanyQuery, sub_names: list[str]) -> ResolutionResult:
+    async def _resolve_composite(self, query: CompanyQuery, sub_names: list[str]) -> ResolutionResult:
         """Un groupement d'entreprises n'a pas de SIREN propre : on résout
         chaque membre et on retourne le premier trouvé (comportement du
         script d'origine), en le traçant clairement dans matched_name.
         """
         for sub_name in sub_names:
             sub_query = CompanyQuery(raw_name=sub_name, address=query.address, role=query.role)
-            result = self._resolve_single(sub_query)
+            result = await self._resolve_single(sub_query)
             if result.is_resolved:
                 return ResolutionResult(
                     query=query,
@@ -64,15 +64,18 @@ class SirenResolver:
                 )
         return ResolutionResult(query=query, siren=None, confidence=MatchConfidence.NONE)
 
-    def _resolve_single(self, query: CompanyQuery) -> ResolutionResult:
+    async def _resolve_single(self, query: CompanyQuery) -> ResolutionResult:
         for provider in self._providers:
             if not provider.is_available:
                 logger.debug("Fournisseur %s indisponible, passage au suivant.", provider.name)
                 continue
             try:
-                result = provider.resolve(query)
-                if result.is_resolved:
-                    return result
+                siren = await provider.resolve(query)
+                if siren:
+                    if provider.name != "cache":
+                        self._cache.upsert_many([(query, siren)])
+                    confidence = MatchConfidence.CACHE if provider.name == "cache" else MatchConfidence.OFFICIAL_API
+                    return ResolutionResult(query=query, siren=siren, confidence=confidence, match_score=1.0)
             except ProviderQuotaExceeded:
                 logger.info("Quota épuisé pour %s, passage au fournisseur suivant.", provider.name)
                 continue

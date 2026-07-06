@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -7,7 +8,7 @@ import requests
 
 from ..config import RechercheEntreprisesConfig
 from ..exceptions import ProviderUnavailable
-from ..models import Address, CompanyQuery, MatchConfidence, ResolutionResult
+from ..models import CompanyQuery
 from ..rate_limiter import TokenBucketRateLimiter
 from ..text_utils import name_similarity
 from .base import SirenProvider
@@ -25,7 +26,7 @@ class RechercheEntreprisesProvider(SirenProvider):
         faux positifs, au lieu de prendre "le premier lien qui matche".
     """
 
-    name = "recherche_entreprises"
+    name = "api_gouv_siren"
 
     def __init__(self, config: RechercheEntreprisesConfig, min_match_score: float = 0.55):
         self._config = config
@@ -37,7 +38,7 @@ class RechercheEntreprisesProvider(SirenProvider):
     def is_available(self) -> bool:
         return True  # API publique, pas de quota connu à faire respecter côté client
 
-    def resolve(self, query: CompanyQuery) -> ResolutionResult:
+    async def resolve(self, query: CompanyQuery) -> str | None:
         params = {
             "q": query.raw_name,
             "per_page": 5,
@@ -47,26 +48,15 @@ class RechercheEntreprisesProvider(SirenProvider):
         if query.address.department:
             params["departement"] = query.address.department
 
-        payload = self._get_with_retry(params)
+        payload = await asyncio.to_thread(self._get_with_retry, params)
         best = self._best_match(payload.get("results", []), query)
-        if best is None:
-            return ResolutionResult(query=query, siren=None, confidence=MatchConfidence.NONE)
-        siren, score, matched_name = best
-        return ResolutionResult(
-            query=query,
-            siren=siren,
-            confidence=MatchConfidence.OFFICIAL_API,
-            match_score=score,
-            matched_name=matched_name,
-        )
+        return best[0] if best is not None else None
 
     def _best_match(self, results: list[dict], query: CompanyQuery) -> tuple[str, float, str] | None:
         best: tuple[str, float, str] | None = None
         for r in results:
             candidate_name = r.get("nom_complet") or r.get("nom_raison_sociale") or ""
             score = name_similarity(query.raw_name, candidate_name)
-            # Bonus léger si le code postal du siège correspond -> réduit
-            # les faux positifs sur les raisons sociales génériques.
             siege = r.get("siege", {}) or {}
             if query.address.zip_code and siege.get("code_postal") == query.address.zip_code:
                 score = min(1.0, score + 0.1)
@@ -98,3 +88,7 @@ class RechercheEntreprisesProvider(SirenProvider):
 
     def _sleep_backoff(self, attempt: int) -> None:
         time.sleep(self._config.backoff_base_seconds * (2 ** attempt))
+
+
+class ApiGouvSirenProvider(RechercheEntreprisesProvider):
+    name = "api_gouv_siren"

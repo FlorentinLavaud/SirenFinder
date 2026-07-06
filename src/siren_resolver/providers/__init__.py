@@ -1,5 +1,10 @@
 from .base import SirenProvider
-from .google_cse import GoogleCSEProvider
-from .recherche_entreprises import RechercheEntreprisesProvider
+from .cache_siren import CacheSirenProvider
+from .local_ml_siren import LocalMlSirenConfig, LocalMlSirenProvider
 
-__all__ = ["SirenProvider", "RechercheEntreprisesProvider", "GoogleCSEProvider"]
+__all__ = [
+    "SirenProvider",
+    "CacheSirenProvider",
+    "LocalMlSirenConfig",
+    "LocalMlSirenProvider",
+]

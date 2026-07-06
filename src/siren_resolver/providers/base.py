@@ -2,20 +2,19 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import CompanyQuery, ResolutionResult
+from ..models import CompanyQuery
 
 
 class SirenProvider(ABC):
     """Interface commune (Strategy pattern) : chaque fournisseur sait
-    résoudre une CompanyQuery en ResolutionResult, ou lever
-    ProviderUnavailable / ProviderQuotaExceeded. Le resolver orchestre
-    la liste ordonnée de fournisseurs sans connaître leurs détails.
+    résoudre une CompanyQuery en siren ou lever ProviderUnavailable /
+    ProviderQuotaExceeded.
     """
 
     name: str
 
     @abstractmethod
-    def resolve(self, query: CompanyQuery) -> ResolutionResult:
+    async def resolve(self, query: CompanyQuery) -> str | None:
         ...
 
     @property

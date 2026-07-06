@@ -4,10 +4,12 @@ Usage :
     python main.py
 
 Variables d'environnement attendues (voir siren_resolver/config.py) :
-    SIREN_DATA_DIR          dossier contenant les parquet en entrée/sortie
-    GOOGLE_CSE_API_KEY      optionnel, active le fallback Google CSE
-    GOOGLE_CSE_ID           optionnel
-    GOOGLE_CSE_DAILY_QUOTA  optionnel (défaut 100, quota gratuit standard)
+    SIREN_DATA_DIR                   dossier contenant les parquet en entrée/sortie
+    SIREN_REFERENCE_ROOT             chemin vers le référentiel SIRENE nettoyé (parquet partitionné)
+    LOCAL_ML_MODEL_PATH              chemin vers le modèle LightGBM (optionnel)
+    LOCAL_ML_BI_ENCODER_MODEL_NAME   nom du modèle sentence-transformers
+    LOCAL_ML_CANDIDATE_LIMIT         nombre max de candidats DuckDB
+    LOCAL_ML_STRICT_THRESHOLD        seuil de validation final
 """
 from __future__ import annotations
 
@@ -16,9 +18,10 @@ import logging
 from siren_resolver import (
     AWARDED_COLUMNS,
     CONTRACTING_COLUMNS,
-    GoogleCSEProvider,
+    CacheSirenProvider,
+    LocalMlSirenConfig,
+    LocalMlSirenProvider,
     ParquetSirenCache,
-    RechercheEntreprisesProvider,
     ResolverConfig,
     SirenResolutionPipeline,
     SirenResolver,
@@ -35,8 +38,16 @@ def build_pipeline(config: ResolverConfig, columns, stock_filename: str) -> Sire
         prune_seed=config.pipeline.cache_prune_seed,
     )
     providers = [
-        RechercheEntreprisesProvider(config.recherche_entreprises, config.pipeline.min_match_score),
-        GoogleCSEProvider(config.google_cse),  # no-op si non configuré (is_available == False)
+        CacheSirenProvider(cache),
+        LocalMlSirenProvider(
+            LocalMlSirenConfig(
+                parquet_root=config.pipeline.siren_reference_root,
+                model_path=config.pipeline.local_ml_model_path,
+                bi_encoder_model_name=config.pipeline.local_ml_bi_encoder_model_name,
+                candidate_limit=config.pipeline.local_ml_candidate_limit,
+                strict_threshold=config.pipeline.local_ml_strict_threshold,
+            )
+        ),
     ]
     resolver = SirenResolver(cache=cache, providers=providers)
     return SirenResolutionPipeline(config=config, resolver=resolver, cache=cache, columns=columns)

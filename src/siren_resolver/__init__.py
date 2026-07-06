@@ -2,7 +2,12 @@ from .cache import ParquetSirenCache
 from .config import ResolverConfig
 from .models import Address, CompanyQuery, MatchConfidence, ResolutionResult
 from .pipeline import AWARDED_COLUMNS, CONTRACTING_COLUMNS, EntityColumns, SirenResolutionPipeline
-from .providers import GoogleCSEProvider, RechercheEntreprisesProvider, SirenProvider
+from .providers import (
+    CacheSirenProvider,
+    LocalMlSirenConfig,
+    LocalMlSirenProvider,
+    SirenProvider,
+)
 from .resolver import SirenResolver
 
 __all__ = [
@@ -13,8 +18,9 @@ __all__ = [
     "ResolverConfig",
     "ParquetSirenCache",
     "SirenProvider",
-    "RechercheEntreprisesProvider",
-    "GoogleCSEProvider",
+    "CacheSirenProvider",
+    "LocalMlSirenConfig",
+    "LocalMlSirenProvider",
     "SirenResolver",
     "SirenResolutionPipeline",
     "EntityColumns",

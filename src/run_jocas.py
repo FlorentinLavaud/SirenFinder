@@ -41,9 +41,10 @@ from jocas_common import (
     sql_siren_norm,
 )
 from siren_resolver import (
-    GoogleCSEProvider,
+    CacheSirenProvider,
+    LocalMlSirenConfig,
+    LocalMlSirenProvider,
     ParquetSirenCache,
-    RechercheEntreprisesProvider,
     ResolverConfig,
     SirenResolutionPipeline,
     SirenResolver,
@@ -144,8 +145,16 @@ def run_resolution(missing_df: pd.DataFrame) -> pd.DataFrame:
         prune_seed=config.pipeline.cache_prune_seed,
     )
     providers = [
-        RechercheEntreprisesProvider(config.recherche_entreprises, config.pipeline.min_match_score),
-        GoogleCSEProvider(config.google_cse),
+        CacheSirenProvider(cache),
+        LocalMlSirenProvider(
+            LocalMlSirenConfig(
+                parquet_root=config.pipeline.siren_reference_root,
+                model_path=config.pipeline.local_ml_model_path,
+                bi_encoder_model_name=config.pipeline.local_ml_bi_encoder_model_name,
+                candidate_limit=config.pipeline.local_ml_candidate_limit,
+                strict_threshold=config.pipeline.local_ml_strict_threshold,
+            )
+        ),
     ]
     resolver = SirenResolver(cache=cache, providers=providers)
     pipeline = SirenResolutionPipeline(config=config, resolver=resolver, cache=cache, columns=ENTREPRISE_COLUMNS)

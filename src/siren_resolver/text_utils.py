@@ -102,6 +102,21 @@ def parse_address(raw: str | dict) -> Address:
     )
 
 
+def build_address_from_context(context: dict) -> Address:
+    if not isinstance(context, dict):
+        return Address()
+    return Address(
+        street=_normalize_address_component(context.get("street")),
+        zip_code=_normalize_address_component(
+            context.get("zip_code") or context.get("postal_code") or context.get("code_postal")
+        ),
+        city=_normalize_address_component(context.get("city") or context.get("ville")),
+        department_hint=_normalize_address_component(
+            context.get("department") or context.get("departement") or context.get("department_hint")
+        ),
+    )
+
+
 def extract_siren_from_siret_or_siren(value: Optional[str]) -> Optional[str]:
     if not value:
         return None

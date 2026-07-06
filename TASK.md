@@ -23,3 +23,6 @@
   * *Constat :* Le resolver doit s'intégrer proprement dans la future architecture cible de traitement de données de JobIA.
   * *Action :* Packager la logique du `SirenProvider` et du resolver sous forme d'un composant modulaire (ex: une Software-Defined Asset ou une Op Dagster).
   * *Objectif :* Permettre une intégration fluide en aval de l'ingestion des offres et en amont des transformations lourdes sur dbt.
+
+- [ ] **Dockerisation du Pipeline Dagster**
+  * *Action :* Créer un `Dockerfile` pour le projet afin d'embarquer Dagster, DuckDB et ton resolver dans une image unique, prête à être déployée sur n'importe quel serveur (VPS, AWS ECS, etc.).

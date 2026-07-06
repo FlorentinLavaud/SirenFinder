@@ -2,14 +2,12 @@
 
 Module pour retrouver le SIREN d'une entreprise à partir d'informations partielles ou bruitées.
 
----
 
-## Utilisation de l'API (Django)
+## Utilisation de l'API
 
 Le moteur de sirénisation est exposé via une API REST développée sous **Django / Django REST Framework**.
 Elle permet d'industrialiser le processus en intégrant le matching directement dans vos applications ou vos pipelines ETL.
 
----
 
 ## Point d'entrée (Endpoint)
 
@@ -17,7 +15,6 @@ Elle permet d'industrialiser le processus en intégrant le matching directement 
 * **Méthode :** `POST`
 * **Format :** `application/json`
 
----
 
 ## Exemples d'intégration
 
@@ -31,9 +28,8 @@ headers = {"Content-Type": "application/json"}
 
 # Exemple de payload incluant des variables de contexte géographique
 data = {
-    "nom_entreprise": "Societe de Transports Durand et Fils",
-    "code_postal": "75011",  # Optionnel mais recommandé pour lever les ambiguïtés
-    "departement": "75"      # Optionnel
+    "nom_entreprise": "FNAC",
+    "code_postal": "75006",
 }
 
 response = requests.post(url, json=data, headers=headers)
@@ -56,7 +52,6 @@ curl -X POST http://localhost:8000/api/v1/sirenise/ \
   -d '{"nom_entreprise": "Fnac Paris", "departement": "75"}'
 ```
 
----
 
 ## Format de la réponse (JSON)
 
@@ -66,16 +61,16 @@ En cas de succès (`200 OK`), l'API retourne un objet structuré contenant les i
 {
   "query": {
     "nom_entreprise": "Fnac Paris",
-    "departement": "75"
+    "code_postal": "75006",
   },
   "match_found": true,
   "score": 0.94,
   "method": "fuzzy_geo_weighted",
-  "siren": "055800258",
-  "siret": "05580025800127",
+  "siren": "350127460",
+  "siret": "35012746000078",
   "raison_sociale": "SOCIETE DES MAGASINS FNAC",
   "enseigne": "FNAC PARIS",
-  "adresse_normalisee": "74 AVENUE DES CHAMPS ELYSEES, 75008 PARIS"
+  "adresse_normalisee": "136 RUE DE RENNES, 75006 PARIS"
 }
 ```
 

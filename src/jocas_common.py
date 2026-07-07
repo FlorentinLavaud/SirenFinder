@@ -55,9 +55,44 @@ NAME_BLACKLIST = {
     ".",
     "communes",
     "place-de-l-emploi-public",
+    "Adecco Medical",
+    "Adecco",
+    "Randstad",
+    "Samsic", 
+    "Samsic Emploi"
+    "Manpower", 
+    "SHIVA GROUPE SAS",
+    "Temporis Interim", 
+    ""
 }
 
-
+INTERIM_PATTERNS = {
+    "adecco",
+    "manpower",
+    "randstad",
+    "samsic",
+    "temporis",
+    "crit",
+    "synergie",
+    "proman",
+    "start people",
+    "interaction",
+    "actual",
+    "partnaire",
+    "leader",
+    "triangle",
+    "supplay",
+    "sup interim",
+    "ras interim",
+    "welljob",
+    "iziwork",
+    "ergalis",
+    "menway",
+    "adwork",
+    "groupe morgan services",
+    "metier interim",
+    "abalone",
+}
 def sql_clean_numeric(col: str) -> str:
     """Strippe le suffixe '.0' produit par la promotion en DOUBLE d'une
     colonne numérique contenant des NaN (ex: location_zipcode lu comme
@@ -79,12 +114,26 @@ def sql_name_norm(col: str) -> str:
 
 
 def sql_is_blacklisted_name(col: str) -> str:
-    """Prédicat SQL : True si le nom est un placeholder connu (blacklist
-    statique) ou trop court pour être une raison sociale exploitable."""
+    """Prédicat SQL : True si le nom est un placeholder connu,
+    correspond à une agence d'intérim ou est trop court."""
     normalized = sql_name_norm(col)
-    values = ", ".join("'" + v.replace("'", "''") + "'" for v in sorted(NAME_BLACKLIST))
-    return f"({normalized} IN ({values}) OR length({normalized}) <= 1)"
 
+    exact_values = ", ".join(
+        "'" + v.replace("'", "''") + "'"
+        for v in sorted(NAME_BLACKLIST)
+    )
+
+    like_patterns = " OR ".join(
+        [
+            f"{normalized} LIKE '%{p.replace("'", "''")}%'"
+            for p in sorted(INTERIM_PATTERNS)
+        ]
+    )
+    return (
+        f"({normalized} IN ({exact_values}) "
+        f"OR ({like_patterns}) "
+        f"OR length({normalized}) <= 1)"
+    )
 
 def connect_jocas() -> duckdb.DuckDBPyConnection:
     """Ouvre la connexion DuckDB et enregistre la vue `jocas` sur le bucket

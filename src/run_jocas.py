@@ -112,13 +112,20 @@ def extract_missing_entities(
             count(*) AS n_offres
         FROM jocas
         WHERE entreprise_nom IS NOT NULL
-          AND trim(entreprise_nom) != ''
-          AND NOT {sql_is_blacklisted_name('entreprise_nom')}
+        AND trim(entreprise_nom) != ''
+        AND NOT {sql_is_blacklisted_name('entreprise_nom')}
+        AND {sql_clean_numeric('location_zipcode')} IS NOT NULL
         GROUP BY 1, 2, 3, 4
-        HAVING count(*) FILTER (WHERE {sql_siren_norm('entreprise_siren')} IS NOT NULL) = 0
-           AND count(*) >= {int(min_offers)}
-        ORDER BY n_offres DESC
+        HAVING count(*) FILTER (
+            WHERE {sql_siren_norm('entreprise_siren')} IS NOT NULL
+        ) = 0
+        AND count(*) >= {int(min_offers)}
+        ORDER BY
+            n_offres ASC,
+            entreprise_nom,
+            location_zipcode
     """
+    
     if limit is not None:
         query += f"\n        LIMIT {int(limit)}"
 
@@ -153,6 +160,7 @@ def run_resolution(missing_df: pd.DataFrame) -> pd.DataFrame:
                 bi_encoder_model_name=config.pipeline.local_ml_bi_encoder_model_name,
                 candidate_limit=config.pipeline.local_ml_candidate_limit,
                 strict_threshold=config.pipeline.local_ml_strict_threshold,
+                s3=config.pipeline.s3,
             )
         ),
     ]

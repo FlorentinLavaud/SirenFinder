@@ -1,5 +1,5 @@
 from .cache import ParquetSirenCache
-from .config import ResolverConfig
+from .config import ResolverConfig, S3Config
 from .models import Address, CompanyQuery, MatchConfidence, ResolutionResult
 from .pipeline import AWARDED_COLUMNS, CONTRACTING_COLUMNS, EntityColumns, SirenResolutionPipeline
 from .providers import (
@@ -16,6 +16,7 @@ __all__ = [
     "MatchConfidence",
     "ResolutionResult",
     "ResolverConfig",
+    "S3Config",
     "ParquetSirenCache",
     "SirenProvider",
     "CacheSirenProvider",

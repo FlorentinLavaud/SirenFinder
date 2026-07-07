@@ -46,6 +46,7 @@ def build_pipeline(config: ResolverConfig, columns, stock_filename: str) -> Sire
                 bi_encoder_model_name=config.pipeline.local_ml_bi_encoder_model_name,
                 candidate_limit=config.pipeline.local_ml_candidate_limit,
                 strict_threshold=config.pipeline.local_ml_strict_threshold,
+                s3=config.pipeline.s3,
             )
         ),
     ]

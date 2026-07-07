@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable
 
 import duckdb
 
+from .config import S3Config
 from .models import Address
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -22,54 +24,147 @@ class SirenCandidate:
 
 
 class DuckDBSirenRepository:
-    """Accès local à un référentiel SIRENE via DuckDB + Parquet.
+    """Acces au referentiel SIRENE (local ou S3/MinIO) via DuckDB + Parquet.
 
-    L'objectif est de faire du smart blocking en ne chargeant que les
-    candidats pertinents géographiquement (département, code postal,
-    ville) avant de calculer des scores de similarité.
+    Le referentiel est partitionne par `code_departement`
+    (cf. siren_fetching.fetch_stock_sirene.write_cleaned_dataset), sous la
+    forme `{root}/code_departement=75/*.parquet`. Quand le departement de
+    l'offre est connu, on cible directement ce sous-dossier : DuckDB ne liste
+    et ne lit alors que les fichiers de ce departement (partition pruning),
+    ce qui evite de parcourir l'integralite de la base a chaque resolution --
+    determinant sur S3, ou lister/scanner toutes les partitions a un cout
+    reseau non negligeable.
     """
 
-    def __init__(self, parquet_root: Path | str):
-        self._parquet_root = Path(parquet_root)
+    def __init__(self, parquet_root: str, s3_config: S3Config | None = None):
+        self._parquet_root = str(parquet_root).replace("\\", "/").rstrip("/")
+        self._is_s3 = self._parquet_root.startswith("s3://")
         self._conn = duckdb.connect(database=":memory:")
-        self._register_parquet_source()
+        if self._is_s3:
+            self._configure_httpfs(s3_config or S3Config())
 
-    def _register_parquet_source(self) -> None:
-        parquet_path = str(self._parquet_root).replace("\\", "/")
+    def _configure_httpfs(self, s3_config: S3Config) -> None:
+        if not s3_config.is_configured:
+            raise ValueError(
+                "Un referentiel SIREN sur S3 a ete demande "
+                f"({self._parquet_root}) mais AWS_ACCESS_KEY_ID / "
+                "AWS_SECRET_ACCESS_KEY ne sont pas renseignes dans "
+                "l'environnement (variables Onyxia)."
+            )
         self._conn.execute("INSTALL httpfs; LOAD httpfs;")
-        self._conn.execute(
-            f"CREATE VIEW IF NOT EXISTS siren_reference AS "
-            f"SELECT * FROM read_parquet('{parquet_path}/*.parquet')"
+        self._conn.execute("SET s3_endpoint=?;", [s3_config.endpoint])
+        self._conn.execute("SET s3_access_key_id=?;", [s3_config.access_key_id])
+        self._conn.execute("SET s3_secret_access_key=?;", [s3_config.secret_access_key])
+        if s3_config.session_token:
+            self._conn.execute("SET s3_session_token=?;", [s3_config.session_token])
+        self._conn.execute("SET s3_url_style=?;", [s3_config.url_style])
+        self._conn.execute("SET s3_region=?;", [s3_config.region])
+        logger.info(
+            "DuckDB configure pour lire le referentiel SIREN sur S3 (%s, endpoint=%s).",
+            self._parquet_root,
+            s3_config.endpoint,
         )
+
+    def _table_glob(self, department: str | None) -> str:
+        """Chemin (local ou s3://) passe a read_parquet().
+
+        Si le departement est connu, on cible directement la partition Hive
+        correspondante ; sinon on retombe sur un scan de toute l'arborescence
+        (hive_partitioning=true reconstitue alors `code_departement` a la
+        volee, utile pour un filtrage par ville/code postal seul).
+        """
+        if department:
+            return f"{self._parquet_root}/code_departement={department}/*.parquet"
+        return f"{self._parquet_root}/**/*.parquet"
 
     def lookup_candidates(
         self,
         department: str | None = None,
         city: str | None = None,
         zip_code: str | None = None,
-        limit: int = 64,
+        limit: int = 20,
     ) -> list[SirenCandidate]:
-        filters: list[str] = []
-        params: list[str] = []
+        """
+        Retourne un scope de candidats SIREN.
 
-        if department:
-            filters.append("departement = ?")
-            params.append(department)
+        Stratégie :
+        - privilégie la proximité géographique ;
+        - élargit progressivement si trop peu de candidats ;
+        - le scoring nom est fait ensuite.
+        """
+
+        table_glob = self._table_glob(department)
+        read_parquet_args = f"'{table_glob}', hive_partitioning=true"
+
+        base_select = """
+            SELECT
+                siren,
+                raison_sociale,
+                enseigne,
+                naf_ape,
+                code_postal,
+                commune,
+                code_departement,
+                is_headquarters
+            FROM read_parquet({table})
+        """.format(table=read_parquet_args)
+
+        scopes = []
+
+        # 1) Recherche locale forte
+        if zip_code and city:
+            scopes.append((
+                """
+                WHERE code_postal = ?
+                AND lower(commune) = lower(?)
+                """,
+                [zip_code, city],
+            ))
+
+        # 2) Recherche CP seulement
         if zip_code:
-            filters.append("code_postal = ?")
-            params.append(zip_code)
-        if city:
-            filters.append("lower(commune) = lower(?)")
-            params.append(city)
+            scopes.append((
+                """
+                WHERE code_postal = ?
+                """,
+                [zip_code],
+            ))
 
-        sql = "SELECT siren, raison_sociale, enseigne, naf_ape, code_postal, commune, departement, est_siege "
-        sql += "FROM siren_reference "
-        if filters:
-            sql += "WHERE " + " AND ".join(filters) + " "
-        sql += "LIMIT ?"
-        params.append(str(limit))
+        # 3) Département seulement
+        if department:
+            scopes.append((
+                """
+                WHERE code_departement = ?
+                """,
+                [department],
+            ))
 
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = []
+
+        for where_clause, params in scopes:
+            sql = f"""
+                {base_select}
+                {where_clause}
+                LIMIT ?
+            """
+
+            try:
+                rows = self._conn.execute(
+                    sql,
+                    params + [limit],
+                ).fetchall()
+
+            except duckdb.IOException as exc:
+                logger.warning(
+                    "Lecture Parquet impossible %s : %s",
+                    table_glob,
+                    exc,
+                )
+                continue
+
+            if len(rows) >= limit:
+                break
+
         return [
             SirenCandidate(
                 siren=str(row[0]),

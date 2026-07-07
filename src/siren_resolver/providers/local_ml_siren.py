@@ -10,6 +10,7 @@ import numpy as np
 from rapidfuzz import fuzz
 from sentence_transformers import SentenceTransformer
 
+from ..config import S3Config
 from ..duckdb_repository import DuckDBSirenRepository
 from ..models import CompanyQuery
 from ..ml_arbitrage import LightGBMArbitrator, MatchFeatures
@@ -20,11 +21,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LocalMlSirenConfig:
-    parquet_root: Path
+    # Chemin local OU URI S3 (s3://bucket/...). Volontairement `str` : un
+    # `Path` collapse le "//" d'une URI s3:// et la corrompt silencieusement.
+    parquet_root: str
     model_path: Path | None = None
     bi_encoder_model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     candidate_limit: int = 64
     strict_threshold: float = 0.85
+    s3: S3Config | None = None
 
 
 class LocalMlSirenProvider(SirenProvider):
@@ -32,7 +36,7 @@ class LocalMlSirenProvider(SirenProvider):
 
     def __init__(self, config: LocalMlSirenConfig):
         self._config = config
-        self._repository = DuckDBSirenRepository(config.parquet_root)
+        self._repository = DuckDBSirenRepository(config.parquet_root, s3_config=config.s3)
         self._arbitrator = LightGBMArbitrator(config.model_path) if config.model_path else None
         self._encoder = SentenceTransformer(config.bi_encoder_model_name)
 

@@ -24,79 +24,80 @@ class SirenCandidate:
 
 
 class DuckDBSirenRepository:
-    """Acces au referentiel SIRENE (local ou S3/MinIO) via DuckDB + Parquet.
 
-    Le referentiel est partitionne par `code_departement`
-    (cf. siren_fetching.fetch_stock_sirene.write_cleaned_dataset), sous la
-    forme `{root}/code_departement=75/*.parquet`. Quand le departement de
-    l'offre est connu, on cible directement ce sous-dossier : DuckDB ne liste
-    et ne lit alors que les fichiers de ce departement (partition pruning),
-    ce qui evite de parcourir l'integralite de la base a chaque resolution --
-    determinant sur S3, ou lister/scanner toutes les partitions a un cout
-    reseau non negligeable.
-    """
+    def __init__(
+        self,
+        parquet_root: str,
+        s3_config: S3Config | None = None,
+    ):
+        self._parquet_root = parquet_root.rstrip("/").replace("\\", "/")
+        self._conn = duckdb.connect(":memory:")
 
-    def __init__(self, parquet_root: str, s3_config: S3Config | None = None):
-        self._parquet_root = str(parquet_root).replace("\\", "/").rstrip("/")
-        self._is_s3 = self._parquet_root.startswith("s3://")
-        self._conn = duckdb.connect(database=":memory:")
-        if self._is_s3:
-            self._configure_httpfs(s3_config or S3Config())
+        if self._parquet_root.startswith("s3://"):
+            self._configure_s3(s3_config or S3Config())
 
-    def _configure_httpfs(self, s3_config: S3Config) -> None:
-        if not s3_config.is_configured:
+    def _configure_s3(self, config: S3Config) -> None:
+        if not config.is_configured:
             raise ValueError(
-                "Un referentiel SIREN sur S3 a ete demande "
-                f"({self._parquet_root}) mais AWS_ACCESS_KEY_ID / "
-                "AWS_SECRET_ACCESS_KEY ne sont pas renseignes dans "
-                "l'environnement (variables Onyxia)."
+                "Lecture S3 demandée mais credentials AWS/MinIO absents."
             )
+
         self._conn.execute("INSTALL httpfs; LOAD httpfs;")
-        self._conn.execute("SET s3_endpoint=?;", [s3_config.endpoint])
-        self._conn.execute("SET s3_access_key_id=?;", [s3_config.access_key_id])
-        self._conn.execute("SET s3_secret_access_key=?;", [s3_config.secret_access_key])
-        if s3_config.session_token:
-            self._conn.execute("SET s3_session_token=?;", [s3_config.session_token])
-        self._conn.execute("SET s3_url_style=?;", [s3_config.url_style])
-        self._conn.execute("SET s3_region=?;", [s3_config.region])
+
+        settings = {
+            "s3_endpoint": config.endpoint,
+            "s3_access_key_id": config.access_key_id,
+            "s3_secret_access_key": config.secret_access_key,
+            "s3_url_style": config.url_style,
+            "s3_region": config.region,
+        }
+
+        if config.session_token:
+            settings["s3_session_token"] = config.session_token
+
+        for key, value in settings.items():
+            self._conn.execute(
+                f"SET {key}=?",
+                [value],
+            )
+
         logger.info(
-            "DuckDB configure pour lire le referentiel SIREN sur S3 (%s, endpoint=%s).",
+            "Référentiel SIRENE chargé depuis %s",
             self._parquet_root,
-            s3_config.endpoint,
         )
 
     def _table_glob(self, department: str | None) -> str:
-        """Chemin (local ou s3://) passe a read_parquet().
-
-        Si le departement est connu, on cible directement la partition Hive
-        correspondante ; sinon on retombe sur un scan de toute l'arborescence
-        (hive_partitioning=true reconstitue alors `code_departement` a la
-        volee, utile pour un filtrage par ville/code postal seul).
-        """
         if department:
-            return f"{self._parquet_root}/code_departement={department}/*.parquet"
+            return (
+                f"{self._parquet_root}/"
+                f"code_departement={department}/*.parquet"
+            )
+
         return f"{self._parquet_root}/**/*.parquet"
+
+    def _candidate_from_row(self, row) -> SirenCandidate:
+        return SirenCandidate(
+            siren=str(row[0]),
+            official_name=str(row[1] or ""),
+            enseigne=row[2],
+            naf_ape=row[3],
+            zip_code=row[4],
+            city=row[5],
+            department=row[6],
+            is_headquarters=bool(row[7]),
+        )
 
     def lookup_candidates(
         self,
-        department: str | None = None,
+        department: str | None,
         city: str | None = None,
         zip_code: str | None = None,
-        limit: int = 20,
+        limit: int = 64,
     ) -> list[SirenCandidate]:
-        """
-        Retourne un scope de candidats SIREN.
 
-        Stratégie :
-        - privilégie la proximité géographique ;
-        - élargit progressivement si trop peu de candidats ;
-        - le scoring nom est fait ensuite.
-        """
+        glob = self._table_glob(department)
 
-        table_glob = self._table_glob(department)
-        read_parquet_args = f"'{table_glob}', hive_partitioning=true"
-
-        base_select = """
+        base = f"""
             SELECT
                 siren,
                 raison_sociale,
@@ -106,45 +107,51 @@ class DuckDBSirenRepository:
                 commune,
                 code_departement,
                 is_headquarters
-            FROM read_parquet({table})
-        """.format(table=read_parquet_args)
+            FROM read_parquet(
+                '{glob}',
+                hive_partitioning=true
+            )
+        """
 
         scopes = []
 
-        # 1) Recherche locale forte
         if zip_code and city:
-            scopes.append((
-                """
-                WHERE code_postal = ?
-                AND lower(commune) = lower(?)
-                """,
-                [zip_code, city],
-            ))
+            scopes.append(
+                (
+                    """
+                    WHERE code_postal = ?
+                    AND lower(commune) = lower(?)
+                    """,
+                    [zip_code, city],
+                )
+            )
 
-        # 2) Recherche CP seulement
         if zip_code:
-            scopes.append((
-                """
-                WHERE code_postal = ?
-                """,
-                [zip_code],
-            ))
+            scopes.append(
+                (
+                    """
+                    WHERE code_postal = ?
+                    """,
+                    [zip_code],
+                )
+            )
 
-        # 3) Département seulement
         if department:
-            scopes.append((
-                """
-                WHERE code_departement = ?
-                """,
-                [department],
-            ))
+            scopes.append(
+                (
+                    """
+                    WHERE code_departement = ?
+                    """,
+                    [department],
+                )
+            )
 
-        rows = []
+        for where, params in scopes:
 
-        for where_clause, params in scopes:
             sql = f"""
-                {base_select}
-                {where_clause}
+                {base}
+                {where}
+                ORDER BY is_headquarters DESC
                 LIMIT ?
             """
 
@@ -156,32 +163,28 @@ class DuckDBSirenRepository:
 
             except duckdb.IOException as exc:
                 logger.warning(
-                    "Lecture Parquet impossible %s : %s",
-                    table_glob,
+                    "Erreur lecture SIRENE %s : %s",
+                    glob,
                     exc,
                 )
                 continue
 
-            if len(rows) >= limit:
-                break
+            if rows:
+                return [
+                    self._candidate_from_row(row)
+                    for row in rows
+                ]
 
-        return [
-            SirenCandidate(
-                siren=str(row[0]),
-                official_name=str(row[1] or ""),
-                enseigne=str(row[2]) if row[2] else None,
-                naf_ape=str(row[3]) if row[3] else None,
-                zip_code=str(row[4]) if row[4] else None,
-                city=str(row[5]) if row[5] else None,
-                department=str(row[6]) if row[6] else None,
-                is_headquarters=bool(row[7]) if row[7] is not None else False,
-            )
-            for row in rows
-        ]
+        return []
 
-    def candidate_scope(self, address: Address, limit: int = 64) -> list[SirenCandidate]:
+    def candidate_scope(
+        self,
+        address: Address,
+        limit: int = 64,
+    ) -> list[SirenCandidate]:
+
         return self.lookup_candidates(
-            department=address.department,
+            department=address.department_hint,
             city=address.city,
             zip_code=address.zip_code,
             limit=limit,

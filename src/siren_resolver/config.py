@@ -29,6 +29,7 @@ class S3Config:
     session_token: str | None = field(default_factory=lambda: os.getenv("AWS_SESSION_TOKEN"))
     url_style: str = field(default_factory=lambda: os.getenv("AWS_S3_URL_STYLE", "path"))
     region: str = field(default_factory=lambda: os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
+    parquet_root: str = field(default_factory=lambda: os.getenv("SIREN_REFERENCE_ROOT", "."))
 
     @property
     def is_configured(self) -> bool:

@@ -8,6 +8,7 @@ from typing import Optional
 
 import numpy as np
 from rapidfuzz import fuzz
+from rapidfuzz.distance import Levenshtein
 from sentence_transformers import SentenceTransformer
 
 from ..config import S3Config
@@ -50,7 +51,9 @@ class LocalMlSirenProvider(SirenProvider):
         return await asyncio.to_thread(self._resolve_sync, query)
 
     def _resolve_sync(self, query: CompanyQuery) -> str | None:
-        candidates = self._repository.candidate_scope(query.address, limit=self._config.candidate_limit)
+        candidates = self._repository.candidate_scope(
+            query.address, query.raw_name, limit=self._config.candidate_limit
+        )
         if not candidates:
             return None
 
@@ -60,7 +63,7 @@ class LocalMlSirenProvider(SirenProvider):
 
         for candidate in candidates:
             score_jw = fuzz.token_sort_ratio(query.raw_name, candidate.official_name) / 100.0
-            score_lev = 1.0 - (fuzz.normalized_levenshtein(query.raw_name, candidate.official_name) / 100.0)
+            score_lev = Levenshtein.normalized_similarity(query.raw_name, candidate.official_name)
             candidate_emb = self._encoder.encode(candidate.official_name, convert_to_numpy=True)
             cosine = float(
                 np.dot(query_embedding, candidate_emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(candidate_emb) + 1e-12)

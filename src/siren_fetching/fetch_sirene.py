@@ -84,6 +84,7 @@ OUTPUT_COLUMNS = [
     "siren",
     "siret",
     "raison_sociale",
+    "sigle",
     "enseigne",
     "naf_ape",
     "naf_label",
@@ -142,10 +143,13 @@ def extract_row(etablissement: dict[str, Any]) -> dict[str, Any] | None:
     code_postal = adresse.get("codePostalEtablissement")
     commune = adresse.get("libelleCommuneEtablissement")
 
+    sigle = unite_legale.get("sigleUniteLegale")
+
     return {
         "siren": str(siren).strip(),
         "siret": str(siret).strip(),
         "raison_sociale": str(raison_sociale).strip(),
+        "sigle": str(sigle).strip() if sigle else None,
         "enseigne": etablissement.get("periodesEtablissement", [{}])[0].get("enseigne1Etablissement")
         if periodes
         else None,

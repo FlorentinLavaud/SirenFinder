@@ -62,7 +62,7 @@ def parse_args() -> argparse.Namespace:
              "unique mais rapporte bien plus une fois résolue). Défaut : 1 (aucun filtre).",
     )
     parser.add_argument(
-        "--limit", type=int, default=10,
+        "--limit", type=int, default=100,
         help="Limite le nombre d'entités traitées (utile pour un test rapide).",
     )
     parser.add_argument(

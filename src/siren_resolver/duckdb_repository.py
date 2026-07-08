@@ -16,6 +16,7 @@ class SirenCandidate:
     siren: str
     official_name: str
     enseigne: str | None = None
+    sigle: str | None = None
     naf_ape: str | None = None
     zip_code: str | None = None
     city: str | None = None
@@ -80,16 +81,18 @@ class DuckDBSirenRepository:
             siren=str(row[0]),
             official_name=str(row[1] or ""),
             enseigne=row[2],
-            naf_ape=row[3],
-            zip_code=row[4],
-            city=row[5],
-            department=row[6],
-            is_headquarters=bool(row[7]),
+            sigle=row[3],
+            naf_ape=row[4],
+            zip_code=row[5],
+            city=row[6],
+            department=row[7],
+            is_headquarters=bool(row[8]),
         )
 
     def lookup_candidates(
         self,
         department: str | None,
+        raw_name: str,
         city: str | None = None,
         zip_code: str | None = None,
         limit: int = 64,
@@ -97,94 +100,86 @@ class DuckDBSirenRepository:
 
         glob = self._table_glob(department)
 
-        base = f"""
-            SELECT
-                siren,
-                raison_sociale,
-                enseigne,
-                naf_ape,
-                code_postal,
-                commune,
-                code_departement,
-                is_headquarters
-            FROM read_parquet(
-                '{glob}',
-                hive_partitioning=true
-            )
-        """
-
-        scopes = []
+        conditions = []
+        params: list = []
 
         if zip_code and city:
-            scopes.append(
-                (
-                    """
-                    WHERE code_postal = ?
-                    AND lower(commune) = lower(?)
-                    """,
-                    [zip_code, city],
-                )
+            conditions.append(
+                "(CAST(code_postal AS VARCHAR) = ? AND lower(commune) = lower(?))"
             )
-
+            params += [zip_code, city]
         if zip_code:
-            scopes.append(
-                (
-                    """
-                    WHERE code_postal = ?
-                    """,
-                    [zip_code],
-                )
-            )
-
+            conditions.append("(CAST(code_postal AS VARCHAR) = ?)")
+            params += [zip_code]
         if department:
-            scopes.append(
-                (
-                    """
-                    WHERE code_departement = ?
-                    """,
-                    [department],
-                )
+            conditions.append("(code_departement = ?)")
+            params += [department]
+
+        if not conditions:
+            return []
+
+        # Priorité 0 : sigle exact (quasi déterministe pour les EPCI,
+        # associations, syndicats mixtes, etc. -- ex. "CCPLM" pour
+        # "COMMUNAUTE DE COMMUNES PIEGE-LAURAGAIS-MALEPERE"). Testé avant la
+        # géographie car un sigle exact est un signal plus fort qu'un simple
+        # rapprochement de code postal.
+        priority_case = "CASE "
+        case_params: list = []
+        priority_case += "WHEN lower(coalesce(sigle, '')) = ? AND lower(coalesce(sigle, '')) != '' THEN 0 "
+        case_params += [raw_name.lower()]
+        if zip_code and city:
+            priority_case += (
+                "WHEN CAST(code_postal AS VARCHAR) = ? AND lower(commune) = lower(?) THEN 1 "
             )
+            case_params += [zip_code, city]
+        if zip_code:
+            priority_case += "WHEN CAST(code_postal AS VARCHAR) = ? THEN 2 "
+            case_params += [zip_code]
+        if department:
+            priority_case += "WHEN code_departement = ? THEN 3 "
+            case_params += [department]
+        priority_case += "ELSE 4 END"
 
-        for where, params in scopes:
+        where_clause = " OR ".join(conditions)
+        name_lower = raw_name.lower()
 
-            sql = f"""
-                {base}
-                {where}
-                ORDER BY is_headquarters DESC
-                LIMIT ?
-            """
+        sql = f"""
+            SELECT
+                siren, raison_sociale, enseigne, sigle, naf_ape,
+                code_postal, commune, code_departement, is_headquarters,
+                {priority_case} AS priority,
+                GREATEST(
+                    jaro_winkler_similarity(lower(raison_sociale), ?),
+                    jaro_winkler_similarity(lower(coalesce(enseigne, '')), ?),
+                    jaro_winkler_similarity(lower(coalesce(sigle, '')), ?)
+                ) AS name_sim
+            FROM read_parquet('{glob}', hive_partitioning=true)
+            WHERE {where_clause}
+            ORDER BY priority ASC, name_sim DESC, is_headquarters DESC
+            LIMIT ?
+        """
 
-            try:
-                rows = self._conn.execute(
-                    sql,
-                    params + [limit],
-                ).fetchall()
+        try:
+            rows = self._conn.execute(
+                sql,
+                case_params + [name_lower, name_lower, name_lower] + params + [limit],
+            ).fetchall()
+        except duckdb.IOException as exc:
+            logger.warning("Erreur lecture SIRENE %s : %s", glob, exc)
+            return []
 
-            except duckdb.IOException as exc:
-                logger.warning(
-                    "Erreur lecture SIRENE %s : %s",
-                    glob,
-                    exc,
-                )
-                continue
-
-            if rows:
-                return [
-                    self._candidate_from_row(row)
-                    for row in rows
-                ]
-
-        return []
+        return [self._candidate_from_row(row) for row in rows]
 
     def candidate_scope(
         self,
         address: Address,
+        raw_name: str,
         limit: int = 64,
     ) -> list[SirenCandidate]:
 
         return self.lookup_candidates(
             department=address.department_hint,
+            raw_name=raw_name,
             city=address.city,
             zip_code=address.zip_code,
             limit=limit,

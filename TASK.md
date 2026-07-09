@@ -39,6 +39,10 @@ Les acronymes doivent devenir un signal prioritaire.
 
 Tests : CH de Blois / Centre Hospitalier de Blois.
 
+Il faut aussi récupérer les noms commerciaux des entreprises
+
+SIRENE : LAROCHE TOUEILLE (LAROCHE-TOUEILLE - WELDOM) ; JOCAS donne WELDOM PRADES
+
 ## 4. Priorité 3 — Confiance de résolution
 
 Étendre MatchConfidence avec :

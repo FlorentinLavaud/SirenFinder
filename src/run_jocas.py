@@ -98,34 +98,75 @@ def get_s3_duckdb_connection():
 def extract_missing_entities(
     conn: duckdb.DuckDBPyConnection, min_offers: int = 1, limit: int | None = None
 ) -> pd.DataFrame:
-    """Extrait les entités distinctes (nom + localisation) sans SIREN,
-    hors placeholders connus, triées par fréquence décroissante.
+    """Extrait les entités distinctes (nom canonique + localisation) sans SIREN,
+    hors placeholders connus, triées par score de priorité décroissant.
+
+    Le score de priorité favorise :
+    - les entités à fort volume d'offres (n_offres)
+    - les entités présentes sur plusieurs localisations (probable chaîne/franchise,
+      donc plus facilement résolvable via matching national)
+    - les entités avec un code postal propre (5 chiffres)
     """
-    # En DuckDB, on peut utiliser directement les numéros de colonnes (1, 2, 3, 4) 
-    # dans le GROUP BY pour s'assurer qu'on regroupe sur le résultat transformé du SELECT.
     query = f"""
+        WITH base AS (
+            SELECT
+                {sql_canonical_name('entreprise_nom')} AS entreprise_nom_canon,
+                entreprise_nom,
+                location_label,
+                {sql_clean_numeric('location_zipcode')} AS location_zipcode,
+                {sql_clean_numeric('location_departement')} AS location_departement,
+                entreprise_siren
+            FROM jocas
+            WHERE entreprise_nom IS NOT NULL
+            AND trim(entreprise_nom) != ''
+            AND length(trim(entreprise_nom)) >= 3
+            AND NOT {sql_is_blacklisted_name('entreprise_nom')}
+            AND {sql_clean_numeric('location_zipcode')} IS NOT NULL
+        ),
+        entity_stats AS (
+            SELECT
+                entreprise_nom_canon,
+                count(DISTINCT location_zipcode) AS n_locations
+            FROM base
+            GROUP BY 1
+        ),
+        entities AS (
+            SELECT
+                b.entreprise_nom_canon,
+                any_value(b.entreprise_nom) AS entreprise_nom_exemple,
+                b.location_label,
+                b.location_zipcode,
+                b.location_departement,
+                count(*) AS n_offres
+            FROM base b
+            GROUP BY 1, 3, 4, 5
+            HAVING count(*) FILTER (
+                WHERE {sql_siren_norm('b.entreprise_siren')} IS NOT NULL
+            ) = 0
+            AND count(*) >= {int(min_offers)}
+        )
         SELECT
-            entreprise_nom,
-            location_label,
-            {sql_clean_numeric('location_zipcode')} AS location_zipcode,
-            {sql_clean_numeric('location_departement')} AS location_departement,
-            count(*) AS n_offres
-        FROM jocas
-        WHERE entreprise_nom IS NOT NULL
-        AND trim(entreprise_nom) != ''
-        AND NOT {sql_is_blacklisted_name('entreprise_nom')}
-        AND {sql_clean_numeric('location_zipcode')} IS NOT NULL
-        GROUP BY 1, 2, 3, 4
-        HAVING count(*) FILTER (
-            WHERE {sql_siren_norm('entreprise_siren')} IS NOT NULL
-        ) = 0
-        AND count(*) >= {int(min_offers)}
+            e.entreprise_nom_canon,
+            e.entreprise_nom_exemple,
+            e.location_label,
+            e.location_zipcode,
+            e.location_departement,
+            e.n_offres,
+            s.n_locations,
+            (
+                e.n_offres
+                * ln(1 + s.n_locations)
+                * CASE WHEN length(e.location_zipcode) = 5 THEN 1.0 ELSE 0.5 END
+            ) AS priority_score
+        FROM entities e
+        JOIN entity_stats s USING (entreprise_nom_canon)
         ORDER BY
-            n_offres ASC,
-            entreprise_nom,
+            priority_score DESC,
+            n_offres DESC,
+            entreprise_nom_canon,
             location_zipcode
     """
-    
+
     if limit is not None:
         query += f"\n        LIMIT {int(limit)}"
 
@@ -152,7 +193,7 @@ def run_resolution(missing_df: pd.DataFrame) -> pd.DataFrame:
         prune_seed=config.pipeline.cache_prune_seed,
     )
     providers = [
-        CacheSirenProvider(cache),
+        #CacheSirenProvider(cache),
         LocalMlSirenProvider(
             LocalMlSirenConfig(
                 parquet_root=config.pipeline.siren_reference_root,

@@ -99,6 +99,7 @@ class DuckDBSirenRepository:
     ) -> list[SirenCandidate]:
 
         glob = self._table_glob(department)
+        glob = f"s3://flavaud/SirenFinder/db_sirene_api/code_departement={department}/*.parquet"
 
         conditions = []
         params: list = []

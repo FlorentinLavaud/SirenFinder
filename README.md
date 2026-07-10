@@ -1,5 +1,7 @@
 # SirenFinder
 
+⚠️ Ce repo est encore en phase de développement  
+
 Module pour retrouver le SIREN d'une entreprise à partir d'informations partielles ou bruitées.
 
 

@@ -301,7 +301,7 @@ def main() -> None:
     conn.execute("SET s3_url_style='path';")
     
     # --- EXPORTATION DIRECTE VERS MINIO ---
-    bucket_name = "flavaud"  # <--- METS LE NOM DE TON BUCKET ICI
+    bucket_name = "flavaud" 
     s3_destination = f"s3://{bucket_name}/SirenFinder/jocas_enriched.parquet"
     
     print(f"Écriture du fichier enrichi directement sur S3: {s3_destination}")
